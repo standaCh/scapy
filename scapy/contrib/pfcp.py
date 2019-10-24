@@ -1,6 +1,7 @@
 #! /usr/bin/env python
 
 # Copyright (C) 2019 Travelping GmbH <info@travelping.com>
+#               2019 Stanislav Chromčák <stanislav.chromcak@tieto.com>
 
 # This file is part of Scapy
 # Scapy is free software: you can redistribute it and/or modify
@@ -27,14 +28,14 @@ from scapy.error import warning
 from scapy.fields import BitEnumField, BitField, ByteEnumField, ByteField, \
     ConditionalField, FieldLenField, FieldListField, FlagsField, IntField, \
     IPField, PacketListField, ShortField, StrFixedLenField, StrLenField, \
-    XBitField, XByteField, XIntField
+    XBitField, XByteField, XIntField, XLongField, ThreeBytesField, ShortEnumField
 from scapy.layers.inet import IP, UDP
 from scapy.layers.inet6 import IPv6, IP6Field
 from scapy.layers.ppp import PPP
 from scapy.modules.six.moves import range
 from scapy.packet import bind_layers, bind_bottom_up, bind_top_down, \
     Packet, Raw
-from scapy.volatile import RandInt, RandIP, RandNum, RandString
+from scapy.volatile import RandInt, RandIP, RandNum, RandString, RandShort, RandIP6
 
 
 
@@ -260,6 +261,7 @@ DestinationInterface = {
     2: "SGi-LAN/N6-LAN",
     3: "CP-function",
     4: "LI function",
+    5: "5G VN Internal",
 }
 
 class PFCPHeader(Packet):
@@ -288,7 +290,7 @@ class PFCPHeader(Packet):
     def post_build(self, p, pay):
         p += pay
         if self.length is None:
-            tmp_len = len(p) - 8
+            tmp_len = len(p) - 4
             p = p[:2] + struct.pack("!H", tmp_len) + p[4:]
         return p
 
@@ -511,12 +513,23 @@ class IE_SDF_Filter(IE_Base):
     name = "IE SDF Filter"
     fields_desc = [ShortEnumField("ietype", 23, IEType),
                    ShortField("length", None),
+                   XBitField("SPARE", 0, 3),
+                   BitField("BID", 0, 1),
+                   BitField("FL", 0, 1),
+                   BitField("SPI", 0, 1),
+                   BitField("TTC", 0, 1),
+                   BitField("FD", 0, 1),
+                   ByteField("SPARE", None),
+                   ConditionalField(ShortField("FlowLength", 0), lambda x: x.FD == 1),
+                   ConditionalField(StrLenField("FlowDescription", None, length_from=lambda x:x.FlowLength), lambda x: x.FD == 1),
+                   # TODO - add other fields
                    ]
 
 class IE_ApplicationId(IE_Base):
     name = "IE Application ID"
     fields_desc = [ShortEnumField("ietype", 24, IEType),
                    ShortField("length", None),
+                   StrLenField("ApplicationIdentifier", None, length_from=lambda x:x.length),
                    ]
 
 class IE_GateStatus(IE_Base):
@@ -925,10 +938,35 @@ class IE_DownlinkDataReport(IE_Base):
                    ShortField("length", None),
                    ]
 
+OuterHeaderCreationDescription = {
+    # Bits in the first byte
+    1<<8: "GTP-U/UDP/IPv4",
+    2<<8: "GTP-U/UDP/IPv6",
+    4<<8: "UDP/IPv4",
+    8<<8: "UDP/IPv6",
+    16<<8: "IPv4",
+    32<<8: "IPv6",
+    64<<8: "C-TAG",
+    128<<8: "S-TAG",
+    # Bits in the second byte
+    1: "N19",
+    2: "N6",
+}
+
 class IE_OuterHeaderCreation(IE_Base):
     name = "IE Outer Header Creation"
     fields_desc = [ShortEnumField("ietype", 84, IEType),
                    ShortField("length", None),
+                   ShortEnumField("OuterHeaderCreation", None, OuterHeaderCreationDescription),
+                   ConditionalField(XIntField("TEID", 0), lambda x: x.OuterHeaderCreation == 1<<8),
+                   ConditionalField(IPField("IPv4", None),
+                                    lambda x: x.OuterHeaderCreation in [1<<8, 4<<8, 16<<8]),
+                   ConditionalField(IPField("IPv6", None),
+                                    lambda x: x.OuterHeaderCreation in [2<<8, 8<<8, 32<<8]),
+                   ConditionalField(ShortField("PortNumber", RandShort()),
+                                    lambda x: x.OuterHeaderCreation in [1<<8, 2<<8, 4<<8, 8<<8]),
+                   ContitionalField(ThreeBytesField("CTAG", None), lambda x: x.OuterHeaderCreation == 64<<8),
+                   ContitionalField(ThreeBytesField("STAG", None), lambda x: x.OuterHeaderCreation == 128<<8),
                    ]
 
 class IE_Create_BAR(IE_Base):
@@ -983,6 +1021,18 @@ class IE_UE_IP_Address(IE_Base):
     name = "IE UE IP Address"
     fields_desc = [ShortEnumField("ietype", 93, IEType),
                    ShortField("length", None),
+                   XBitField("SPARE", 0, 3),
+                   BitField("CH", 0, 1),
+                   BitField("IPV6D", 0, 1),
+                   BitField("SD", 0, 1),
+                   BitField("V4", 1, 1),
+                   BitField("V6", 0, 1),
+                   ConditionalField(IPField("IPv4", None),
+                                    lambda x: x.V4 == 1),
+                   ConditionalField(IP6Field("IPv6", RandIP6()),
+                                    lambda x: x.V6 == 1),
+                   ConditionalField(ShortField("IPv6PrefixDelegationBits", 0),
+                                    lambda x: x.IPV6D == 1),
                    ]
 
 class IE_PacketRate(IE_Base):
@@ -1015,7 +1065,7 @@ class IE_RecoveryTimeStamp(IE_Base):
     name = "IE Recovery Time Stamp"
     fields_desc = [ShortEnumField("ietype", 96, IEType),
                    ShortField("length", 4),
-                   IntField("Recovery Time Stamp", RandInt())
+                   IntField("RecoveryTimeStamp", None)
                    ]
 
 class IE_DLFlowLevelMarking(IE_Base):
@@ -1088,7 +1138,7 @@ class IE_FAR_Id(IE_Base):
     name = "IE FAR ID"
     fields_desc = [ShortEnumField("ietype", 108, IEType),
                    ShortField("length", None),
-                   ConditionalField(IntField("FARid", RandInt()), lambda x: x.length > 3),
+                   ConditionalField(IntField("FARid", None), lambda x: x.length > 3),
                    ConditionalField(StrLenField("data", "", length_from=lambda x: x.length - 4),
                                     lambda x: x.length > 4)]
 
