@@ -1,3 +1,5 @@
+The intention of this fork is to improve **PFCP encoder** (scapy/contrib/pfcp.py) from https://github.com/roadrunnr/scapy a little bit.
+
 <p align="center">
 <img src="doc/scapy_logo.png" width=200>
 </p>
